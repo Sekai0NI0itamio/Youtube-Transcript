@@ -46,68 +46,60 @@ def safe_filename(s: str) -> str:
 
 def download_audio(video_url: str, out_path: str) -> bool:
     """
-    Download the best audio quality stream (no video) as a WAV file.
-    Uses android_vr player client which does not require PO tokens on CI runners.
-    Falls back through multiple clients if the first fails.
+    Download the best audio quality stream using yt-dlp with YouTube cookies.
+    Cookies are required on CI (GitHub Actions datacenter IPs are bot-flagged).
+    Falls back through multiple player clients if the first fails.
     """
     print("  [→] Downloading audio with yt-dlp …")
 
-    # Clients that don't require PO tokens (as of 2025):
-    # android_vr – no PO token, not DRM'd, works on datacenter IPs
-    # web_embedded – no PO token, only embeddable videos
-    # tv_embedded  – no PO token, only embeddable videos
-    clients_to_try = ["android_vr", "tv_embedded", "web_embedded"]
-
-    base_cmd = [
-        "yt-dlp",
-        "--no-playlist",
-        "-f", "bestaudio/best",
-        "-x", "--audio-format", "wav",
-        "--audio-quality", "0",
-        "--postprocessor-args", "ffmpeg:-ar 16000 -ac 1",
-        "-o", out_path,
-        "--no-progress",
-        "--no-warnings",
-    ]
-
-    # If cookies are provided via secret, write them to a temp file
     cookies_content = os.environ.get("YOUTUBE_COOKIES", "").strip()
-    cookies_file = None
-    if cookies_content:
-        import tempfile
-        cookies_file = tempfile.NamedTemporaryFile(mode="w", suffix=".txt",
-                                                    delete=False, encoding="utf-8")
-        cookies_file.write(cookies_content)
-        cookies_file.close()
-        print("  [→] Using YouTube cookies from secret.")
 
-    for client in clients_to_try:
-        print(f"  [→] Trying player_client={client} …")
-        cmd = base_cmd + [
-            "--extractor-args", f"youtube:player_client={client}",
+    if not cookies_content:
+        print("  [✗] YOUTUBE_COOKIES secret is not set.")
+        print("      Run the local script once to auto-sync your Chrome cookies.")
+        return False
+
+    # Write cookies to a temp file for yt-dlp
+    import tempfile
+    fd, cookies_file = tempfile.mkstemp(suffix=".txt", prefix="yt_cookies_")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(cookies_content)
+
+        base_cmd = [
+            "yt-dlp",
+            "--no-playlist",
+            "--cookies", cookies_file,
+            "-f", "bestaudio/best",
+            "-x", "--audio-format", "wav",
+            "--audio-quality", "0",
+            "--postprocessor-args", "ffmpeg:-ar 16000 -ac 1",
+            "-o", out_path,
+            "--no-progress",
+            "--no-warnings",
         ]
-        if cookies_file:
-            cmd += ["--cookies", cookies_file.name]
-        cmd.append(video_url)
 
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode == 0 and os.path.exists(out_path):
-            print(f"  [✓] Audio downloaded with client={client}: {out_path}")
-            if cookies_file:
-                os.unlink(cookies_file.name)
-            return True
+        # Try clients in order — web first (most formats), then fallbacks
+        for client in ["web", "android_vr", "tv_embedded"]:
+            print(f"  [→] Trying player_client={client} …")
+            cmd = base_cmd + ["--extractor-args", f"youtube:player_client={client}", video_url]
+            result = subprocess.run(cmd, capture_output=True, text=True)
 
-        stderr = result.stderr.strip()
-        print(f"  [!] client={client} failed: {stderr[:300]}")
+            if result.returncode == 0 and os.path.exists(out_path):
+                print(f"  [✓] Audio downloaded with client={client}: {out_path}")
+                return True
 
-    if cookies_file:
+            stderr = result.stderr.strip()
+            print(f"  [!] client={client} failed: {stderr[:250]}")
+
+        print("  [✗] All yt-dlp client variants failed.")
+        return False
+
+    finally:
         try:
-            os.unlink(cookies_file.name)
+            os.unlink(cookies_file)
         except Exception:
             pass
-
-    print("  [✗] All yt-dlp client variants failed.")
-    return False
 
 
 # ---------------------------------------------------------------------------
