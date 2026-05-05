@@ -26,6 +26,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
@@ -89,6 +90,106 @@ def detect_repo() -> str:
     repo = match.group(1)
     ok(f"Repository: {repo}")
     return repo
+
+
+# ---------------------------------------------------------------------------
+# YouTube cookie extraction + GitHub Secret sync
+# ---------------------------------------------------------------------------
+
+def extract_and_sync_cookies(repo: str) -> bool:
+    """
+    Use yt-dlp to decrypt and export Chrome's YouTube cookies to a Netscape
+    cookie file, then push the contents to the YOUTUBE_COOKIES GitHub Secret.
+
+    yt-dlp handles all macOS Keychain decryption internally via
+    --cookies-from-browser, so no manual crypto is needed.
+
+    Returns True if cookies were successfully synced.
+    """
+    if shutil.which("yt-dlp") is None:
+        warn("yt-dlp not found locally — skipping cookie sync.")
+        warn("Install with: pip install yt-dlp")
+        return False
+
+    info("Extracting YouTube cookies from Chrome …")
+    info("(macOS may show a Keychain access prompt — click Allow)")
+
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".txt", delete=False, prefix="yt_cookies_"
+    ) as tmp:
+        cookies_path = tmp.name
+
+    try:
+        # yt-dlp --cookies-from-browser chrome --cookies <file> <url>
+        # The URL is needed to scope the cookie dump; using youtube.com
+        # ensures we get all relevant YouTube cookies.
+        # --skip-download means no actual video is fetched.
+        result = subprocess.run(
+            [
+                "yt-dlp",
+                "--cookies-from-browser", "chrome",
+                "--cookies", cookies_path,
+                "--skip-download",
+                "--quiet",
+                "--no-warnings",
+                "https://www.youtube.com",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+        # yt-dlp exits non-zero when --skip-download is used with a channel/
+        # homepage URL on some versions — check the file exists and has content
+        # rather than relying solely on the return code.
+        if not os.path.exists(cookies_path) or os.path.getsize(cookies_path) == 0:
+            warn(f"Cookie file empty or missing. yt-dlp stderr: {result.stderr[:300]}")
+            return False
+
+        cookie_text = Path(cookies_path).read_text(encoding="utf-8")
+
+        # Sanity check — must look like a Netscape cookie file
+        if "youtube.com" not in cookie_text and "# Netscape" not in cookie_text:
+            warn("Extracted file doesn't look like a YouTube cookie file.")
+            warn(f"First 200 chars: {cookie_text[:200]}")
+            return False
+
+        # Count YouTube-relevant cookie lines
+        yt_lines = [l for l in cookie_text.splitlines()
+                    if "youtube.com" in l or "google.com" in l]
+        ok(f"Extracted {len(yt_lines)} YouTube/Google cookie entries.")
+
+        # Push to GitHub Secret via gh CLI
+        # gh secret set reads the value from stdin when --body is not used,
+        # but using --body with the full text is cleaner and avoids shell escaping.
+        info(f"Syncing YOUTUBE_COOKIES secret to {repo} …")
+        set_result = subprocess.run(
+            ["gh", "secret", "set", "YOUTUBE_COOKIES",
+             "--repo", repo,
+             "--body", cookie_text],
+            capture_output=True,
+            text=True,
+        )
+
+        if set_result.returncode != 0:
+            warn(f"Failed to set secret: {set_result.stderr.strip()[:300]}")
+            return False
+
+        ok("YOUTUBE_COOKIES secret updated successfully.")
+        return True
+
+    except subprocess.TimeoutExpired:
+        warn("Cookie extraction timed out (30s). Chrome may be locked.")
+        return False
+    except Exception as e:
+        warn(f"Cookie extraction failed: {e}")
+        return False
+    finally:
+        # Always clean up the temp file — it contains sensitive cookies
+        try:
+            os.unlink(cookies_path)
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -355,6 +456,9 @@ def main():
     check_gh_installed()
     check_gh_auth()
     repo = detect_repo()
+
+    # Extract Chrome YouTube cookies and sync to GitHub Secret automatically
+    extract_and_sync_cookies(repo)
 
     # Wipe downloads/ so previous run doesn't linger
     downloads_dir = Path("downloads")
