@@ -1,0 +1,6 @@
+# Local dependencies (only needed if you want to run transcribe_youtube.py locally)
+# The GitHub Actions workflow installs these automatically.
+yt-dlp>=2024.1.1
+youtube-transcript-api>=0.6.2
+requests>=2.31.0
+openai-whisper>=20231117
