@@ -49,23 +49,31 @@ def fetch_youtube_transcript(video_id: str) -> str | None:
     """
     Try to pull an existing caption track from YouTube.
     Returns the full transcript as a plain string, or None if unavailable.
+    Compatible with youtube-transcript-api v0.x and v1.x.
     """
     try:
-        from youtube_transcript_api import YouTubeTranscriptApi, NoTranscriptFound, TranscriptsDisabled
+        from youtube_transcript_api import YouTubeTranscriptApi
 
-        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
-
-        # Prefer manually created English captions, then auto-generated ones,
-        # then any available language.
-        for fetch_fn in [
-            lambda tl: tl.find_manually_created_transcript(["en", "en-US", "en-GB"]),
-            lambda tl: tl.find_generated_transcript(["en", "en-US", "en-GB"]),
-            lambda tl: next(iter(tl)),  # first available language
-        ]:
+        # v1.x API: fetch() returns a FetchedTranscript directly
+        # Try English first, then fall back to any available language
+        for lang_codes in [["en", "en-US", "en-GB"], None]:
             try:
-                transcript_obj = fetch_fn(transcript_list)
-                entries = transcript_obj.fetch()
-                text = " ".join(entry["text"] for entry in entries)
+                if lang_codes:
+                    fetched = YouTubeTranscriptApi.fetch(video_id, languages=lang_codes)
+                else:
+                    # Get list of available transcripts and pick the first
+                    transcript_list = YouTubeTranscriptApi.list(video_id)
+                    first = next(iter(transcript_list))
+                    fetched = first.fetch()
+
+                # v1.x returns a FetchedTranscript object; iterate its snippets
+                snippets = list(fetched)
+                if snippets and hasattr(snippets[0], "text"):
+                    text = " ".join(s.text for s in snippets)
+                else:
+                    # Fallback: treat as list of dicts (older shape)
+                    text = " ".join(s["text"] for s in snippets)
+
                 print(f"  [✓] Official YouTube transcript found ({len(text)} chars).")
                 return text
             except Exception:
@@ -84,34 +92,50 @@ def fetch_youtube_transcript(video_id: str) -> str | None:
 def transcribe_with_supadata(video_url: str, api_key: str) -> str | None:
     """
     Send the YouTube URL directly to Supadata's transcript endpoint.
-    Supadata can accept a YouTube URL and handle the download + Whisper
-    transcription on their side — no local audio file needed.
+    Docs: https://supadata.ai/documentation/youtube/get-transcript
     """
-    endpoint = "https://api.supadata.ai/v1/youtube/transcript"
-    headers = {
-        "x-api-key": api_key,
-        "Content-Type": "application/json",
-    }
-    payload = {"url": video_url, "text": True}
+    # Try both known endpoint shapes
+    endpoints = [
+        ("GET",  "https://api.supadata.ai/v1/youtube/transcript",  {"url": video_url, "text": "true"}),
+        ("POST", "https://api.supadata.ai/v1/youtube/transcript",  {"url": video_url, "text": True}),
+        ("GET",  "https://api.supadata.ai/v1/transcript",          {"url": video_url, "text": "true"}),
+    ]
+
+    headers = {"x-api-key": api_key}
 
     print(f"  [→] Sending to Supadata API …")
-    try:
-        resp = requests.post(endpoint, headers=headers, json=payload, timeout=300)
-        resp.raise_for_status()
-        data = resp.json()
+    for method, endpoint, params_or_body in endpoints:
+        try:
+            if method == "GET":
+                resp = requests.get(endpoint, headers=headers, params=params_or_body, timeout=120)
+            else:
+                resp = requests.post(endpoint, headers={**headers, "Content-Type": "application/json"},
+                                     json=params_or_body, timeout=120)
 
-        # Supadata returns { "content": "...", ... } or { "transcript": "..." }
-        text = data.get("content") or data.get("transcript") or data.get("text")
-        if text:
-            print(f"  [✓] Supadata transcript received ({len(text)} chars).")
-            return text
+            if resp.status_code == 404:
+                continue  # try next endpoint shape
 
-        print(f"  [!] Supadata returned unexpected shape: {json.dumps(data)[:300]}")
-    except requests.HTTPError as e:
-        print(f"  [!] Supadata HTTP error {e.response.status_code}: {e.response.text[:300]}")
-    except Exception as e:
-        print(f"  [!] Supadata request failed: {e}")
+            resp.raise_for_status()
+            data = resp.json()
 
+            # Handle both flat-text and chunked responses
+            text = data.get("content") or data.get("transcript") or data.get("text")
+            if not text and isinstance(data.get("chunks"), list):
+                text = " ".join(c.get("text", "") for c in data["chunks"])
+
+            if text:
+                print(f"  [✓] Supadata transcript received ({len(text)} chars).")
+                return text
+
+            print(f"  [!] Supadata returned unexpected shape: {json.dumps(data)[:300]}")
+            return None
+
+        except requests.HTTPError as e:
+            print(f"  [!] Supadata HTTP error {e.response.status_code} ({method} {endpoint}): {e.response.text[:200]}")
+        except Exception as e:
+            print(f"  [!] Supadata request failed: {e}")
+
+    print("  [!] All Supadata endpoint variants failed.")
     return None
 
 
@@ -134,6 +158,7 @@ def transcribe_locally(video_url: str, video_id: str) -> str | None:
         dl_cmd = [
             "yt-dlp",
             "--no-playlist",
+            "--js-runtimes", "nodejs",
             "-x", "--audio-format", "mp3",
             "--audio-quality", "5",          # lower quality = smaller file
             "-o", audio_path,

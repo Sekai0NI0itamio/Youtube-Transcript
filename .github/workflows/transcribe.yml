@@ -27,15 +27,17 @@ jobs:
           python-version: "3.11"
 
       # ---------------------------------------------------------------
-      - name: Install system dependencies (ffmpeg)
+      - name: Install system dependencies (ffmpeg + nodejs for yt-dlp)
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y ffmpeg
+          sudo apt-get install -y ffmpeg nodejs
 
       # ---------------------------------------------------------------
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
+          # Pin torch to CPU-only build to avoid downloading 2 GB of CUDA libs
+          pip install torch==2.2.2 --index-url https://download.pytorch.org/whl/cpu
           pip install \
             yt-dlp \
             youtube-transcript-api \
