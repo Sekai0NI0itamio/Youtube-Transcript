@@ -8,14 +8,16 @@ Usage:
 What it does:
   1. Validates that `gh` (GitHub CLI) is installed and authenticated.
   2. Detects the current GitHub repository from `git remote`.
-  3. Triggers the `transcribe.yml` workflow_dispatch with your URLs.
-  4. Polls the workflow run until it completes (or fails).
-  5. Downloads the transcript artifact to ./downloads/ (replaces previous run).
-  6. Prints a summary of every transcript file.
+  3. Triggers the `transcribe.yml` workflow (two parallel jobs).
+  4. Polls both jobs independently:
+       - As soon as the fast job (captions + Supadata) finishes, downloads
+         and prints those transcripts immediately.
+       - Continues polling the Whisper job in the background and downloads
+         its transcripts when it finishes.
+  5. All output lands in ./downloads/ (previous run is replaced).
 
 Requirements:
-    pip install requests          (only used for optional direct API calls)
-    gh CLI  (https://cli.github.com) – must be installed and `gh auth login` run.
+    gh CLI  (https://cli.github.com) – installed and `gh auth login` run.
 """
 
 import json
@@ -25,268 +27,304 @@ import shutil
 import subprocess
 import sys
 import time
-import zipfile
 from datetime import datetime
 from pathlib import Path
 
 
 # ---------------------------------------------------------------------------
-# Colour helpers (gracefully degrade on Windows / dumb terminals)
+# Colour helpers
 # ---------------------------------------------------------------------------
 _USE_COLOR = sys.stdout.isatty() and os.name != "nt"
 
 def _c(code: str, text: str) -> str:
     return f"\033[{code}m{text}\033[0m" if _USE_COLOR else text
 
-def ok(msg):   print(_c("32", f"[✓] {msg}"))
-def info(msg): print(_c("36", f"[→] {msg}"))
-def warn(msg): print(_c("33", f"[!] {msg}"))
-def err(msg):  print(_c("31", f"[✗] {msg}"))
+def ok(msg):    print(_c("32",  f"[✓] {msg}"))
+def info(msg):  print(_c("36",  f"[→] {msg}"))
+def warn(msg):  print(_c("33",  f"[!] {msg}"))
+def err(msg):   print(_c("31",  f"[✗] {msg}"))
+def head(msg):  print(_c("1",   f"\n{'='*60}\n  {msg}\n{'='*60}"))
 
 
 # ---------------------------------------------------------------------------
 # Shell helpers
 # ---------------------------------------------------------------------------
 
-def run(cmd: list[str], capture=True, check=True) -> subprocess.CompletedProcess:
-    """Run a command, returning the CompletedProcess. Raises on non-zero exit if check=True."""
-    return subprocess.run(
-        cmd,
-        capture_output=capture,
-        text=True,
-        check=check,
-    )
+def run_cmd(cmd: list[str], capture=True, check=True) -> subprocess.CompletedProcess:
+    return subprocess.run(cmd, capture_output=capture, text=True, check=check)
 
 
 def gh(*args, capture=True, check=True) -> subprocess.CompletedProcess:
-    """Convenience wrapper for `gh` CLI calls."""
-    return run(["gh", *args], capture=capture, check=check)
+    return run_cmd(["gh", *args], capture=capture, check=check)
 
 
 # ---------------------------------------------------------------------------
-# Pre-flight checks
+# Pre-flight
 # ---------------------------------------------------------------------------
 
 def check_gh_installed():
     if shutil.which("gh") is None:
-        err("GitHub CLI (`gh`) is not installed.")
-        print("  Install it from https://cli.github.com and run `gh auth login`.")
+        err("GitHub CLI (gh) is not installed. See https://cli.github.com")
         sys.exit(1)
     ok("gh CLI found.")
 
 
 def check_gh_auth():
-    result = gh("auth", "status", check=False)
-    if result.returncode != 0:
-        err("Not authenticated with GitHub CLI.")
-        print("  Run: gh auth login")
+    if gh("auth", "status", check=False).returncode != 0:
+        err("Not authenticated. Run: gh auth login")
         sys.exit(1)
     ok("gh CLI authenticated.")
 
 
 def detect_repo() -> str:
-    """Return 'owner/repo' from the current git remote."""
     try:
-        result = run(["git", "remote", "get-url", "origin"])
-        remote = result.stdout.strip()
+        remote = run_cmd(["git", "remote", "get-url", "origin"]).stdout.strip()
     except subprocess.CalledProcessError:
-        err("Could not read git remote 'origin'. Are you inside the repo directory?")
+        err("Could not read git remote 'origin'.")
         sys.exit(1)
-
-    # SSH:   git@github.com:owner/repo.git
-    # HTTPS: https://github.com/owner/repo.git
     match = re.search(r"github\.com[:/](.+?)(?:\.git)?$", remote)
     if not match:
-        err(f"Remote URL doesn't look like a GitHub repo: {remote}")
+        err(f"Remote doesn't look like a GitHub repo: {remote}")
         sys.exit(1)
-
     repo = match.group(1)
     ok(f"Repository: {repo}")
     return repo
 
 
 # ---------------------------------------------------------------------------
-# Workflow trigger
+# Trigger workflow
 # ---------------------------------------------------------------------------
 
 def trigger_workflow(repo: str, urls: list[str]) -> str:
-    """
-    Trigger the transcribe workflow and return the new run ID.
-    We capture the run list *before* and *after* to identify the new run.
-    """
+    """Trigger the workflow and return the new run ID."""
     workflow_file = "transcribe.yml"
-    urls_input = " ".join(urls)
-
-    # Snapshot existing run IDs so we can identify the new one
     before_ids = _list_run_ids(repo, workflow_file)
 
     info(f"Triggering workflow with {len(urls)} URL(s) …")
     gh(
         "workflow", "run", workflow_file,
         "--repo", repo,
-        "--field", f"youtube_urls={urls_input}",
+        "--field", f"youtube_urls={' '.join(urls)}",
     )
 
-    # Poll until a new run appears (GitHub takes a few seconds to register it)
-    info("Waiting for the workflow run to be registered …")
-    run_id = None
+    info("Waiting for run to be registered …")
     for attempt in range(30):
         time.sleep(3)
         after_ids = _list_run_ids(repo, workflow_file)
-        new_ids = [rid for rid in after_ids if rid not in before_ids]
+        new_ids = [r for r in after_ids if r not in before_ids]
         if new_ids:
             run_id = new_ids[0]
-            break
+            ok(f"Run started: {run_id}")
+            print(f"  https://github.com/{repo}/actions/runs/{run_id}")
+            return run_id
         if attempt % 5 == 4:
             info(f"  Still waiting … ({(attempt+1)*3}s)")
 
-    if not run_id:
-        err("Timed out waiting for the workflow run to appear.")
-        sys.exit(1)
-
-    ok(f"Workflow run started: {run_id}")
-    print(f"  View in browser: https://github.com/{repo}/actions/runs/{run_id}")
-    return run_id
+    err("Timed out waiting for the workflow run to appear.")
+    sys.exit(1)
 
 
 def _list_run_ids(repo: str, workflow_file: str) -> list[str]:
-    result = gh(
-        "run", "list",
-        "--repo", repo,
-        "--workflow", workflow_file,
-        "--limit", "10",
-        "--json", "databaseId",
-        check=False,
-    )
+    result = gh("run", "list", "--repo", repo, "--workflow", workflow_file,
+                "--limit", "10", "--json", "databaseId", check=False)
     if result.returncode != 0:
         return []
     try:
-        data = json.loads(result.stdout)
-        return [str(item["databaseId"]) for item in data]
-    except (json.JSONDecodeError, KeyError):
+        return [str(item["databaseId"]) for item in json.loads(result.stdout)]
+    except Exception:
         return []
 
 
 # ---------------------------------------------------------------------------
-# Poll until complete
+# Job status helpers
 # ---------------------------------------------------------------------------
 
-TERMINAL_STATUSES = {"completed", "failure", "cancelled", "timed_out", "skipped"}
+TERMINAL = {"completed", "failure", "cancelled", "timed_out", "skipped"}
 
-def wait_for_run(repo: str, run_id: str) -> str:
+# Maps artifact name → human label
+ARTIFACTS = {
+    "transcripts-fast":    "Fast (captions + Supadata)",
+    "transcripts-whisper": "Whisper (audio → text)",
+}
+
+# Maps job name in the workflow to artifact name
+JOB_TO_ARTIFACT = {
+    "fast-transcript":    "transcripts-fast",
+    "whisper-transcript": "transcripts-whisper",
+}
+
+
+def get_jobs_status(repo: str, run_id: str) -> dict[str, dict]:
     """
-    Poll the run status every 15 seconds until it reaches a terminal state.
-    Returns the final conclusion string (e.g. 'success', 'failure').
+    Returns a dict keyed by job name with keys: status, conclusion.
     """
-    info(f"Polling run {run_id} …")
-    spinner = ["|", "/", "-", "\\"]
-    tick = 0
-    start = time.time()
+    result = gh(
+        "run", "view", run_id,
+        "--repo", repo,
+        "--json", "jobs",
+        check=False,
+    )
+    if result.returncode != 0:
+        return {}
+    try:
+        jobs = json.loads(result.stdout).get("jobs", [])
+        return {
+            j["name"]: {"status": j.get("status", ""), "conclusion": j.get("conclusion") or ""}
+            for j in jobs
+        }
+    except Exception:
+        return {}
 
-    while True:
-        result = gh(
-            "run", "view", run_id,
-            "--repo", repo,
-            "--json", "status,conclusion,updatedAt",
-            check=False,
-        )
-        if result.returncode == 0:
-            data = json.loads(result.stdout)
-            status = data.get("status", "unknown")
-            conclusion = data.get("conclusion") or ""
-            elapsed = int(time.time() - start)
-            print(
-                f"\r  {spinner[tick % 4]}  Status: {status:<12}  "
-                f"Elapsed: {elapsed}s   ",
-                end="",
-                flush=True,
-            )
-            tick += 1
-            if status in TERMINAL_STATUSES or conclusion in TERMINAL_STATUSES:
-                print()  # newline after spinner
-                final = conclusion or status
-                if final == "success":
-                    ok(f"Workflow completed successfully ({elapsed}s).")
-                else:
-                    warn(f"Workflow finished with status: {final} ({elapsed}s).")
-                return final
-        else:
-            warn(f"Could not fetch run status (will retry): {result.stderr.strip()[:120]}")
 
-        time.sleep(15)
+def job_is_done(job: dict) -> bool:
+    return job.get("status") in TERMINAL or job.get("conclusion") in TERMINAL
+
+
+def job_succeeded(job: dict) -> bool:
+    return job.get("conclusion") == "success"
 
 
 # ---------------------------------------------------------------------------
-# Download artifacts
+# Download a single named artifact
 # ---------------------------------------------------------------------------
 
-def download_artifacts(repo: str, run_id: str) -> Path:
-    """Download all artifacts for the run into ./downloads/, replacing previous contents."""
-    dest = Path("downloads")
-
-    # Wipe and recreate so old runs don't accumulate
-    if dest.exists():
-        shutil.rmtree(dest)
-    dest.mkdir(parents=True)
-
-    info(f"Downloading artifacts to {dest} …")
-
+def download_artifact(repo: str, run_id: str, artifact_name: str, dest: Path) -> bool:
+    """Download one artifact by name into dest/. Returns True on success."""
     result = gh(
         "run", "download", run_id,
         "--repo", repo,
+        "--name", artifact_name,
         "--dir", str(dest),
         check=False,
     )
-
     if result.returncode != 0:
-        warn(f"gh run download reported an issue:\n  {result.stderr.strip()[:300]}")
-    else:
-        ok(f"Artifacts downloaded to: {dest.resolve()}")
-
-    return dest
+        warn(f"Could not download '{artifact_name}': {result.stderr.strip()[:200]}")
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
-# Display summary
+# Print transcript files from a directory
 # ---------------------------------------------------------------------------
 
-def print_summary(dest: Path, run_id: str):
-    print()
-    print("=" * 60)
-    print(f"  TRANSCRIPT DOWNLOAD SUMMARY  (run {run_id})")
-    print("=" * 60)
+def print_transcripts(artifact_dir: Path, label: str):
+    head(f"RESULTS — {label}")
 
-    txt_files = sorted(dest.rglob("*.txt"))
-    json_files = sorted(dest.rglob("summary.json"))
+    summary_files = list(artifact_dir.rglob("summary.json"))
+    txt_files     = sorted(f for f in artifact_dir.rglob("*.txt")
+                           if f.name != "summary.json")
 
-    if not txt_files and not json_files:
-        warn("No transcript files found in the downloaded artifacts.")
-        return
-
-    # Print JSON summary if present
-    for jf in json_files:
+    # Print summary table
+    for sf in summary_files:
         try:
-            data = json.loads(jf.read_text(encoding="utf-8"))
-            print(f"\n  Summary:")
+            data = json.loads(sf.read_text(encoding="utf-8"))
+            print(f"  {'Video ID':<15}  {'Source':<22}  {'Chars':>8}  Status")
+            print(f"  {'-'*15}  {'-'*22}  {'-'*8}  ------")
             for item in data:
-                status = "✓" if item.get("transcript") else "✗"
-                method = item.get("method") or "failed"
-                vid    = item.get("video_id") or "?"
-                print(f"    [{status}] {vid}  ({method})")
-                if item.get("error"):
-                    print(f"         Error: {item['error']}")
+                vid = (item.get("video_id") or "?")[:15]
+                # fast summary has "sources" dict; whisper summary has "chars"
+                sources = item.get("sources")
+                if sources:
+                    for src, chars in sources.items():
+                        print(f"  {vid:<15}  {src:<22}  {chars:>8,}  ✓")
+                    if not sources:
+                        print(f"  {vid:<15}  {'—':<22}  {'0':>8}  ✗  {item.get('error','')}")
+                else:
+                    chars = item.get("chars", 0)
+                    status = "✓" if chars else "✗"
+                    err_msg = item.get("error") or ""
+                    print(f"  {vid:<15}  {'whisper':<22}  {chars:>8,}  {status}  {err_msg}")
         except Exception:
             pass
 
-    # List transcript text files
+    # List files
     if txt_files:
-        print(f"\n  Transcript files:")
+        print(f"\n  Files:")
         for tf in txt_files:
             size = tf.stat().st_size
-            print(f"    • {tf}  ({size:,} bytes)")
+            print(f"    • {tf.relative_to(tf.parents[2])}  ({size:,} bytes)")
+    else:
+        warn("No .txt transcript files found in this artifact.")
 
     print()
-    ok(f"All files saved under: {dest.resolve()}")
+
+
+# ---------------------------------------------------------------------------
+# Main polling loop — watches both jobs, downloads each as it finishes
+# ---------------------------------------------------------------------------
+
+def poll_and_download(repo: str, run_id: str, downloads_dir: Path):
+    """
+    Poll both jobs. As soon as each job finishes, download its artifact
+    and print the results inline. Returns when both jobs are done.
+    """
+    pending_jobs = set(JOB_TO_ARTIFACT.keys())   # jobs not yet downloaded
+    downloaded   = set()
+    spinner      = ["|", "/", "-", "\\"]
+    tick         = 0
+    start        = time.time()
+
+    info("Polling jobs (fast job typically finishes in ~30–60s) …")
+    print()
+
+    while pending_jobs:
+        time.sleep(8)
+        tick += 1
+        elapsed = int(time.time() - start)
+
+        jobs = get_jobs_status(repo, run_id)
+
+        # Build a compact status line
+        status_parts = []
+        for jname in JOB_TO_ARTIFACT:
+            j = jobs.get(jname, {})
+            st = j.get("status", "queued")
+            co = j.get("conclusion", "")
+            display = co if co else st
+            status_parts.append(f"{jname.split('-')[0]}:{display}")
+
+        print(
+            f"\r  {spinner[tick % 4]}  [{elapsed}s]  "
+            + "  |  ".join(status_parts)
+            + "   ",
+            end="", flush=True,
+        )
+
+        # Check each pending job
+        for jname in list(pending_jobs):
+            j = jobs.get(jname, {})
+            if not job_is_done(j):
+                continue
+
+            # Job finished — download its artifact
+            print()  # newline after spinner
+            artifact_name = JOB_TO_ARTIFACT[jname]
+            label         = ARTIFACTS[artifact_name]
+            conclusion    = j.get("conclusion", "unknown")
+
+            if job_succeeded(j):
+                ok(f"Job '{jname}' finished ({elapsed}s). Downloading '{artifact_name}' …")
+                artifact_dest = downloads_dir / artifact_name
+                artifact_dest.mkdir(parents=True, exist_ok=True)
+                if download_artifact(repo, run_id, artifact_name, artifact_dest):
+                    print_transcripts(artifact_dest, label)
+                    downloaded.add(jname)
+                else:
+                    warn(f"Artifact download failed for '{artifact_name}'.")
+            else:
+                warn(f"Job '{jname}' ended with: {conclusion}. Attempting artifact download anyway …")
+                artifact_dest = downloads_dir / artifact_name
+                artifact_dest.mkdir(parents=True, exist_ok=True)
+                if download_artifact(repo, run_id, artifact_name, artifact_dest):
+                    print_transcripts(artifact_dest, label)
+
+            pending_jobs.discard(jname)
+
+            # Resume spinner on next line if there are still pending jobs
+            if pending_jobs:
+                info("Still waiting for remaining job(s) …")
+
+    print()  # final newline
 
 
 # ---------------------------------------------------------------------------
@@ -296,8 +334,6 @@ def print_summary(dest: Path, run_id: str):
 def main():
     if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
         print(__doc__)
-        print("Example:")
-        print("  python run.py https://youtu.be/dQw4w9WgXcQ https://youtu.be/abc123")
         sys.exit(0)
 
     urls = [u.strip() for u in sys.argv[1:] if u.strip()]
@@ -305,34 +341,36 @@ def main():
         err("No URLs provided.")
         sys.exit(1)
 
-    print()
-    print("=" * 60)
-    print("  YouTube → Transcript  (GitHub Actions runner)")
-    print(f"  {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print("=" * 60)
-    print(f"\n  URLs to process ({len(urls)}):")
+    head(f"YouTube → Transcript  |  {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"  URLs ({len(urls)}):")
     for u in urls:
         print(f"    • {u}")
     print()
 
-    # Pre-flight
     check_gh_installed()
     check_gh_auth()
     repo = detect_repo()
 
-    # Trigger
+    # Wipe downloads/ so previous run doesn't linger
+    downloads_dir = Path("downloads")
+    if downloads_dir.exists():
+        shutil.rmtree(downloads_dir)
+    downloads_dir.mkdir()
+
     run_id = trigger_workflow(repo, urls)
 
-    # Wait
-    conclusion = wait_for_run(repo, run_id)
+    poll_and_download(repo, run_id, downloads_dir)
 
-    # Download
-    dest = download_artifacts(repo, run_id)
-
-    # Summary
-    print_summary(dest, run_id)
-
-    sys.exit(0 if conclusion == "success" else 1)
+    # Final summary
+    head("ALL DONE")
+    all_txt = sorted(downloads_dir.rglob("*.txt"))
+    if all_txt:
+        print(f"  {len(all_txt)} transcript file(s) in {downloads_dir.resolve()}:\n")
+        for tf in all_txt:
+            print(f"    • {tf.relative_to(downloads_dir)}  ({tf.stat().st_size:,} bytes)")
+    else:
+        warn("No transcript files were produced.")
+    print()
 
 
 if __name__ == "__main__":

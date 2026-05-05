@@ -5,80 +5,125 @@ on:
     inputs:
       youtube_urls:
         description: >
-          One or more YouTube URLs, separated by newlines or spaces.
+          One or more YouTube URLs, space or newline separated.
           Example: https://youtu.be/abc123 https://youtu.be/def456
         required: true
         type: string
 
+# Both jobs run in parallel. Each publishes its own artifact as soon as it
+# finishes so the local run.py script can download and display results
+# incrementally without waiting for the slower Whisper job.
+
 jobs:
-  transcribe:
+
+  # =========================================================================
+  # JOB 1 – Fast: YouTube captions + Supadata API
+  # No heavy deps. Typically finishes in under 60 seconds.
+  # =========================================================================
+  fast-transcript:
+    name: "Fast Transcript (captions + Supadata)"
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 10
 
     steps:
-      # ---------------------------------------------------------------
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      # ---------------------------------------------------------------
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      # ---------------------------------------------------------------
-      - name: Install system dependencies (ffmpeg + nodejs for yt-dlp)
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y ffmpeg nodejs
-
-      # ---------------------------------------------------------------
-      - name: Install Python dependencies
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          # Pin torch to CPU-only build to avoid downloading 2 GB of CUDA libs
-          pip install torch==2.2.2 --index-url https://download.pytorch.org/whl/cpu
-          pip install \
-            yt-dlp \
-            youtube-transcript-api \
-            requests \
-            openai-whisper
+          pip install youtube-transcript-api requests
 
-      # ---------------------------------------------------------------
-      - name: Parse URLs and run transcription
+      - name: Run fast transcript job
         env:
           SUPADATA_API_KEY: ${{ secrets.SUPADATA_API_KEY }}
           INPUT_YOUTUBE_URLS: ${{ github.event.inputs.youtube_urls }}
         run: |
-          # Convert the multi-line / space-separated input into individual args.
-          # We use Python itself to safely split and pass them to the script.
           python - <<'PYEOF'
           import subprocess, sys, os
-
           raw = os.environ.get("INPUT_YOUTUBE_URLS", "")
-          # Split on whitespace and newlines, filter empty strings
           urls = [u.strip() for u in raw.replace("\n", " ").split() if u.strip()]
-
           if not urls:
               print("ERROR: No URLs provided.")
               sys.exit(1)
-
-          print(f"Processing {len(urls)} URL(s):")
+          print(f"Fast job processing {len(urls)} URL(s):")
           for u in urls:
               print(f"  • {u}")
-
-          cmd = [sys.executable, "transcribe_youtube.py"] + urls
-          result = subprocess.run(cmd, check=False)
+          result = subprocess.run([sys.executable, "job_fast_transcript.py"] + urls, check=False)
           sys.exit(result.returncode)
           PYEOF
 
-      # ---------------------------------------------------------------
-      - name: Upload transcripts as artifact
-        if: always()   # upload even if some videos failed
+      # Upload immediately when this job finishes (success or failure)
+      - name: Upload fast transcripts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: transcripts
-          path: transcripts/
+          name: transcripts-fast
+          path: transcripts-fast/
+          if-no-files-found: warn
+          retention-days: 7
+          overwrite: true
+
+  # =========================================================================
+  # JOB 2 – Heavy: yt-dlp audio download + local Whisper
+  # Installs torch (CPU), downloads audio, splits into segments, transcribes.
+  # =========================================================================
+  whisper-transcript:
+    name: "Whisper Transcript (audio → text)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install system dependencies (ffmpeg + nodejs)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ffmpeg nodejs
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # CPU-only torch — avoids pulling 2 GB of CUDA libraries
+          pip install torch==2.2.2 --index-url https://download.pytorch.org/whl/cpu
+          pip install yt-dlp openai-whisper
+
+      - name: Run Whisper transcript job
+        env:
+          INPUT_YOUTUBE_URLS: ${{ github.event.inputs.youtube_urls }}
+        run: |
+          python - <<'PYEOF'
+          import subprocess, sys, os
+          raw = os.environ.get("INPUT_YOUTUBE_URLS", "")
+          urls = [u.strip() for u in raw.replace("\n", " ").split() if u.strip()]
+          if not urls:
+              print("ERROR: No URLs provided.")
+              sys.exit(1)
+          print(f"Whisper job processing {len(urls)} URL(s):")
+          for u in urls:
+              print(f"  • {u}")
+          result = subprocess.run([sys.executable, "job_whisper_transcript.py"] + urls, check=False)
+          sys.exit(result.returncode)
+          PYEOF
+
+      # Upload immediately when this job finishes
+      - name: Upload Whisper transcripts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: transcripts-whisper
+          path: transcripts-whisper/
           if-no-files-found: warn
           retention-days: 7
           overwrite: true
