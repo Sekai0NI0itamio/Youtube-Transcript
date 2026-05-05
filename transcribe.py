@@ -103,12 +103,13 @@ def fetch_transcript(url: str, api_key: str) -> tuple[str | None, str]:
     """
     Fetch transcript from Supadata.
     Returns (text, method) where method describes what was used.
-    Tries chunked first (richer output), then flat text.
+
+    Supadata response shape:
+      text=false → {"content": [{"text": "...", "offset": 0, "duration": 5}, ...], "lang": "en"}
+      text=true  → {"content": "full plain text ...", "lang": "en"}
     """
     headers = {"x-api-key": api_key}
 
-    # Try 1: chunked (text=false) — returns timestamped segments
-    # Try 2: flat text (text=true)  — returns plain string
     for text_param, label in [("false", "chunked"), ("true", "flat")]:
         info(f"Fetching transcript ({label}) …")
         try:
@@ -130,29 +131,37 @@ def fetch_transcript(url: str, api_key: str) -> tuple[str | None, str]:
                 )
 
             if resp.status_code == 404:
-                warn(f"Endpoint not found for {label} — trying next …")
+                warn(f"Endpoint not found ({label}) — trying next …")
                 continue
 
             resp.raise_for_status()
             data = resp.json()
 
-            # Chunked response: {"chunks": [{"text": "...", "offset": 0, "duration": 5}]}
-            chunks = data.get("chunks") or data.get("segments") or []
-            if chunks:
+            content = data.get("content")
+
+            # Chunked: content is a list of {"text": "...", "offset": N, "duration": N}
+            if isinstance(content, list):
                 text = " ".join(
                     c.get("text", "").strip()
-                    for c in chunks
-                    if c.get("text", "").strip()
+                    for c in content
+                    if isinstance(c, dict) and c.get("text", "").strip()
                 )
                 if text:
                     return text, f"supadata_{label}"
+                warn(f"Supadata chunked list was empty")
+                continue
 
-            # Flat response: {"content": "..."} or {"text": "..."}
-            text = data.get("content") or data.get("transcript") or data.get("text")
-            if text and text.strip():
-                return text.strip(), f"supadata_{label}"
+            # Flat: content is a plain string
+            if isinstance(content, str) and content.strip():
+                return content.strip(), f"supadata_{label}"
 
-            warn(f"Supadata returned empty content ({label}): {json.dumps(data)[:200]}")
+            # Other field names as fallback
+            for key in ("transcript", "text"):
+                val = data.get(key)
+                if isinstance(val, str) and val.strip():
+                    return val.strip(), f"supadata_{label}"
+
+            warn(f"Supadata returned no usable content ({label}): {json.dumps(data)[:200]}")
 
         except requests.HTTPError as e:
             err(f"HTTP {e.response.status_code}: {e.response.text[:200]}")
