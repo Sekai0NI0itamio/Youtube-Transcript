@@ -103,6 +103,7 @@ jobs:
         env:
           INPUT_YOUTUBE_URLS: ${{ github.event.inputs.youtube_urls }}
           YOUTUBE_COOKIES: ${{ secrets.YOUTUBE_COOKIES }}
+          SUPADATA_API_KEY: ${{ secrets.SUPADATA_API_KEY }}
         run: |
           python - <<'PYEOF'
           import subprocess, sys, os
