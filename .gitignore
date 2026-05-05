@@ -1,5 +1,6 @@
 downloads/
 .env
+chrome-extension/.env
 Library/
 node_modules/
 vendor/

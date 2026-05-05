@@ -1,8 +1,63 @@
 // background.js — Service Worker for YT Transcript extension
 
+// ── Read .env from the extension folder ───────────────────────────────────
+
+async function loadEnvFile() {
+  try {
+    const url  = chrome.runtime.getURL(".env");
+    const resp = await fetch(url);
+    if (!resp.ok) return {};
+
+    const text   = await resp.text();
+    const values = {};
+
+    for (const line of text.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#")) continue;
+      const eq = trimmed.indexOf("=");
+      if (eq === -1) continue;
+      const key = trimmed.slice(0, eq).trim();
+      const val = trimmed.slice(eq + 1).trim().replace(/^["']|["']$/g, "");
+      if (key && val) values[key] = val;
+    }
+
+    return values;
+  } catch (e) {
+    console.warn("[YT Transcript] Could not read .env:", e.message);
+    return {};
+  }
+}
+
+async function autoLoadApiKey() {
+  const env = await loadEnvFile();
+
+  if (!env.SUPADATA_API_KEY) {
+    console.log("[YT Transcript] SUPADATA_API_KEY not found in .env");
+    return;
+  }
+
+  // Only set savePath if user hasn't manually overridden it
+  const existing = await chrome.storage.local.get(["savePath"]);
+  const update   = { apiKey: env.SUPADATA_API_KEY };
+  if (!existing.savePath && env.SAVE_PATH) {
+    update.savePath = env.SAVE_PATH;
+  }
+
+  await chrome.storage.local.set(update);
+  console.log("[YT Transcript] API key loaded from .env ✓");
+}
+
+// Run on every service worker startup (extension load / browser start)
+autoLoadApiKey();
+
 // ── Message router ─────────────────────────────────────────────────────────
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg.type === "RELOAD_API_KEY") {
+    autoLoadApiKey().then(() => sendResponse({ ok: true }));
+    return true;
+  }
+
   if (msg.type === "FETCH_PLAYLIST") {
     fetchPlaylistVideos(msg.url).then(sendResponse);
     return true; // keep channel open for async

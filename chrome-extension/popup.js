@@ -53,15 +53,22 @@ const elBtnShowSet    = $("btn-show-settings");
 // ── Init ───────────────────────────────────────────────────────────────────
 
 async function init() {
+  // Ask background to refresh key from key_server.py before reading storage
+  await chrome.runtime.sendMessage({ type: "RELOAD_API_KEY" }).catch(() => {});
+
   const data = await chrome.storage.local.get(["videos", "apiKey", "savePath", "customCategories"]);
   videos           = data.videos           || [];
   customCategories = data.customCategories || [];
 
-  if (!data.apiKey) {
+  if (data.apiKey) {
+    elInputApiKey.value   = data.apiKey;
+    elSetupBanner.classList.add("hidden");
+  } else {
     elSetupBanner.classList.remove("hidden");
+    elSetupBanner.querySelector("span").textContent =
+      "⚙ Add SUPADATA_API_KEY to chrome-extension/.env";
   }
 
-  if (data.apiKey)   elInputApiKey.value   = data.apiKey;
   if (data.savePath) elInputSavePath.value = data.savePath;
 
   buildCategoryBar();
