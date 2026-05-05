@@ -148,21 +148,38 @@ def extract_and_sync_cookies(repo: str) -> bool:
             warn(f"No cookie data extracted. yt-dlp stderr:\n  {result.stderr.strip()[:400]}")
             return False
 
-        # Count YouTube/Google entries specifically
-        yt_lines = [l for l in data_lines
-                    if "youtube.com" in l or "google.com" in l]
-        ok(f"Extracted {len(data_lines)} total cookies ({len(yt_lines)} YouTube/Google).")
+        # Filter to only YouTube and Google cookies — keeps the secret small
+        # and avoids uploading unrelated site cookies.
+        # Domain column (index 0) may have a leading dot, e.g. ".youtube.com"
+        def is_yt_google(line: str) -> bool:
+            parts = line.split("\t")
+            if not parts:
+                return False
+            domain = parts[0].lstrip(".")
+            return domain.endswith("youtube.com") or domain.endswith("google.com")
 
-        if len(yt_lines) == 0:
-            warn("No YouTube cookies found — are you logged into YouTube in Chrome?")
+        yt_lines = [l for l in data_lines if is_yt_google(l)]
+
+        if not yt_lines:
+            warn("No YouTube/Google cookies found — are you logged into YouTube in Chrome?")
             return False
 
-        # Push to GitHub Secret
+        # Rebuild a clean Netscape file with only the relevant cookies
+        filtered_text = (
+            "# Netscape HTTP Cookie File\n"
+            "# Filtered to YouTube/Google cookies by run.py\n\n"
+            + "\n".join(yt_lines)
+            + "\n"
+        )
+
+        ok(f"Extracted {len(yt_lines)} YouTube/Google cookies (from {len(data_lines)} total).")
+
+        # Push filtered cookies to GitHub Secret
         info(f"Syncing YOUTUBE_COOKIES secret to {repo} …")
         set_result = subprocess.run(
             ["gh", "secret", "set", "YOUTUBE_COOKIES",
              "--repo", repo,
-             "--body", cookie_text],
+             "--body", filtered_text],
             capture_output=True,
             text=True,
         )
