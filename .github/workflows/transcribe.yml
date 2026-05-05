@@ -46,11 +46,12 @@ jobs:
       - name: Parse URLs and run transcription
         env:
           SUPADATA_API_KEY: ${{ secrets.SUPADATA_API_KEY }}
+          INPUT_YOUTUBE_URLS: ${{ github.event.inputs.youtube_urls }}
         run: |
           # Convert the multi-line / space-separated input into individual args.
           # We use Python itself to safely split and pass them to the script.
           python - <<'PYEOF'
-          import subprocess, sys, os, shlex
+          import subprocess, sys, os
 
           raw = os.environ.get("INPUT_YOUTUBE_URLS", "")
           # Split on whitespace and newlines, filter empty strings
@@ -68,8 +69,6 @@ jobs:
           result = subprocess.run(cmd, check=False)
           sys.exit(result.returncode)
           PYEOF
-        env:
-          INPUT_YOUTUBE_URLS: ${{ github.event.inputs.youtube_urls }}
 
       # ---------------------------------------------------------------
       - name: Upload transcripts as artifact
