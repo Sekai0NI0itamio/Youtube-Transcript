@@ -10,7 +10,7 @@ What it does:
   2. Detects the current GitHub repository from `git remote`.
   3. Triggers the `transcribe.yml` workflow_dispatch with your URLs.
   4. Polls the workflow run until it completes (or fails).
-  5. Downloads the transcript artifact to ./downloads/<run-id>/.
+  5. Downloads the transcript artifact to ./downloads/ (replaces previous run).
   6. Prints a summary of every transcript file.
 
 Requirements:
@@ -221,13 +221,16 @@ def wait_for_run(repo: str, run_id: str) -> str:
 # ---------------------------------------------------------------------------
 
 def download_artifacts(repo: str, run_id: str) -> Path:
-    """Download all artifacts for the run into ./downloads/<run_id>/."""
-    dest = Path("downloads") / run_id
-    dest.mkdir(parents=True, exist_ok=True)
+    """Download all artifacts for the run into ./downloads/, replacing previous contents."""
+    dest = Path("downloads")
+
+    # Wipe and recreate so old runs don't accumulate
+    if dest.exists():
+        shutil.rmtree(dest)
+    dest.mkdir(parents=True)
 
     info(f"Downloading artifacts to {dest} …")
 
-    # List artifacts
     result = gh(
         "run", "download", run_id,
         "--repo", repo,
@@ -264,12 +267,11 @@ def print_summary(dest: Path, run_id: str):
     for jf in json_files:
         try:
             data = json.loads(jf.read_text(encoding="utf-8"))
-            print(f"\n  Summary ({jf}):")
+            print(f"\n  Summary:")
             for item in data:
                 status = "✓" if item.get("transcript") else "✗"
                 method = item.get("method") or "failed"
                 vid    = item.get("video_id") or "?"
-                url    = item.get("url", "")
                 print(f"    [{status}] {vid}  ({method})")
                 if item.get("error"):
                     print(f"         Error: {item['error']}")

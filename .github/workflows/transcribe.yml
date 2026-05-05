@@ -77,7 +77,8 @@ jobs:
         if: always()   # upload even if some videos failed
         uses: actions/upload-artifact@v4
         with:
-          name: transcripts-${{ github.run_id }}
+          name: transcripts
           path: transcripts/
           if-no-files-found: warn
           retention-days: 7
+          overwrite: true
