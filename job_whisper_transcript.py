@@ -47,35 +47,67 @@ def safe_filename(s: str) -> str:
 def download_audio(video_url: str, out_path: str) -> bool:
     """
     Download the best audio quality stream (no video) as a WAV file.
-    WAV is uncompressed so Whisper doesn't need to re-decode it.
-    Falls back to mp3 if WAV post-processing fails.
+    Uses android_vr player client which does not require PO tokens on CI runners.
+    Falls back through multiple clients if the first fails.
     """
     print("  [→] Downloading audio with yt-dlp …")
 
-    # Format selector: best audio-only stream, prefer opus/m4a/webm
-    # bestaudio picks the highest-bitrate audio-only format available
-    cmd = [
+    # Clients that don't require PO tokens (as of 2025):
+    # android_vr – no PO token, not DRM'd, works on datacenter IPs
+    # web_embedded – no PO token, only embeddable videos
+    # tv_embedded  – no PO token, only embeddable videos
+    clients_to_try = ["android_vr", "tv_embedded", "web_embedded"]
+
+    base_cmd = [
         "yt-dlp",
         "--no-playlist",
-        "--js-runtimes", "node",
-        # Best audio quality, no video
         "-f", "bestaudio/best",
-        # Extract and convert to WAV (lossless for Whisper)
         "-x", "--audio-format", "wav",
-        "--audio-quality", "0",          # 0 = best quality
-        "--postprocessor-args", "ffmpeg:-ar 16000 -ac 1",  # 16 kHz mono — Whisper's native rate
+        "--audio-quality", "0",
+        "--postprocessor-args", "ffmpeg:-ar 16000 -ac 1",
         "-o", out_path,
         "--no-progress",
-        video_url,
+        "--no-warnings",
     ]
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        print(f"  [!] yt-dlp stderr:\n{result.stderr[:600]}")
-        return False
+    # If cookies are provided via secret, write them to a temp file
+    cookies_content = os.environ.get("YOUTUBE_COOKIES", "").strip()
+    cookies_file = None
+    if cookies_content:
+        import tempfile
+        cookies_file = tempfile.NamedTemporaryFile(mode="w", suffix=".txt",
+                                                    delete=False, encoding="utf-8")
+        cookies_file.write(cookies_content)
+        cookies_file.close()
+        print("  [→] Using YouTube cookies from secret.")
 
-    print(f"  [✓] Audio downloaded: {out_path}")
-    return True
+    for client in clients_to_try:
+        print(f"  [→] Trying player_client={client} …")
+        cmd = base_cmd + [
+            "--extractor-args", f"youtube:player_client={client}",
+        ]
+        if cookies_file:
+            cmd += ["--cookies", cookies_file.name]
+        cmd.append(video_url)
+
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode == 0 and os.path.exists(out_path):
+            print(f"  [✓] Audio downloaded with client={client}: {out_path}")
+            if cookies_file:
+                os.unlink(cookies_file.name)
+            return True
+
+        stderr = result.stderr.strip()
+        print(f"  [!] client={client} failed: {stderr[:300]}")
+
+    if cookies_file:
+        try:
+            os.unlink(cookies_file.name)
+        except Exception:
+            pass
+
+    print("  [✗] All yt-dlp client variants failed.")
+    return False
 
 
 # ---------------------------------------------------------------------------
