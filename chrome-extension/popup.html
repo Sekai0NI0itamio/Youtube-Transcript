@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>YT Transcript</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <!-- ── Header ─────────────────────────────────────────── -->
+  <header>
+    <div class="logo">
+      <span class="logo-icon">▶</span>
+      <span class="logo-text">YT Transcript</span>
+    </div>
+    <button id="btn-copy-all" class="btn-ghost" title="Copy all transcripts">Copy All</button>
+  </header>
+
+  <!-- ── API Key setup (shown when key not set) ─────────── -->
+  <div id="setup-banner" class="setup-banner hidden">
+    <span>⚙ Set your Supadata API key to get started</span>
+    <button id="btn-show-settings" class="btn-link">Set key</button>
+  </div>
+
+  <!-- ── Settings panel ─────────────────────────────────── -->
+  <div id="settings-panel" class="panel hidden">
+    <label class="field-label">Supadata API Key</label>
+    <input id="input-api-key" type="password" placeholder="sd_..." spellcheck="false" />
+    <label class="field-label" style="margin-top:10px">Save transcripts to folder</label>
+    <input id="input-save-path" type="text" placeholder="/Users/you/Desktop/Code Projects/..." />
+    <div class="row" style="margin-top:10px;gap:8px">
+      <button id="btn-save-settings" class="btn-primary" style="flex:1">Save</button>
+      <button id="btn-cancel-settings" class="btn-ghost" style="flex:1">Cancel</button>
+    </div>
+  </div>
+
+  <!-- ── Main UI ────────────────────────────────────────── -->
+  <div id="main-panel">
+
+    <!-- URL input row -->
+    <div class="input-row">
+      <input id="input-url" type="text" placeholder="Paste YouTube URL or use current tab…" />
+      <button id="btn-add-url" class="btn-icon" title="Add URL">＋</button>
+    </div>
+
+    <!-- Category filter bar -->
+    <div id="category-filter-bar" class="category-bar">
+      <button class="cat-chip active" data-cat="all">All</button>
+      <button class="cat-chip" data-cat="Life Lessons">Life Lessons</button>
+      <button class="cat-chip" data-cat="Life Tips">Life Tips</button>
+      <button class="cat-chip" data-cat="Learning">Learning</button>
+      <button class="cat-chip" data-cat="Entertainment">Entertainment</button>
+      <button class="cat-chip" data-cat="Ideas">Ideas</button>
+      <button class="cat-chip" data-cat="Other">Other</button>
+    </div>
+
+    <!-- Action row -->
+    <div class="action-row">
+      <button id="btn-transcribe-current" class="btn-primary">
+        <span class="btn-icon-left">⚡</span> Transcribe Current Page
+      </button>
+      <button id="btn-settings-toggle" class="btn-icon-sm" title="Settings">⚙</button>
+    </div>
+
+    <!-- Copy-all for active category -->
+    <div id="cat-copy-row" class="cat-copy-row hidden">
+      <span id="cat-copy-label">Copy all in <strong></strong></span>
+      <button id="btn-copy-category" class="btn-ghost-sm">Copy</button>
+    </div>
+
+    <!-- Video list -->
+    <div id="video-list" class="video-list">
+      <div class="empty-state">No transcripts yet.<br>Open a YouTube video and click Transcribe.</div>
+    </div>
+
+  </div>
+
+  <!-- ── Category picker modal ──────────────────────────── -->
+  <div id="cat-modal" class="modal hidden">
+    <div class="modal-box">
+      <div class="modal-title">Choose a category</div>
+      <div class="modal-subtitle" id="cat-modal-subtitle"></div>
+      <div class="cat-grid" id="cat-grid">
+        <button class="cat-btn" data-cat="Life Lessons">Life Lessons</button>
+        <button class="cat-btn" data-cat="Life Tips">Life Tips</button>
+        <button class="cat-btn" data-cat="Learning">Learning</button>
+        <button class="cat-btn" data-cat="Entertainment">Entertainment</button>
+        <button class="cat-btn" data-cat="Ideas">Ideas</button>
+        <button class="cat-btn" data-cat="Other">Other ＋</button>
+      </div>
+      <div id="custom-cat-row" class="custom-cat-row hidden">
+        <input id="input-custom-cat" type="text" placeholder="New category name…" />
+        <button id="btn-add-custom-cat" class="btn-primary-sm">Add</button>
+      </div>
+      <button id="btn-cat-cancel" class="btn-ghost" style="margin-top:10px;width:100%">Cancel</button>
+    </div>
+  </div>
+
+  <!-- ── Progress toast ─────────────────────────────────── -->
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
