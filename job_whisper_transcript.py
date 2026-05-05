@@ -57,7 +57,7 @@ def download_audio(video_url: str, out_path: str) -> bool:
     cmd = [
         "yt-dlp",
         "--no-playlist",
-        "--js-runtimes", "nodejs",
+        "--js-runtimes", "node",
         # Best audio quality, no video
         "-f", "bestaudio/best",
         # Extract and convert to WAV (lossless for Whisper)

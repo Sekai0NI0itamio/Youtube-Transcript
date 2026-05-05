@@ -91,6 +91,8 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y ffmpeg nodejs
+          # Verify node is available for yt-dlp's JS runtime
+          node --version
 
       - name: Install Python dependencies
         run: |

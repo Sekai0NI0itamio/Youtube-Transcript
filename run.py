@@ -147,10 +147,11 @@ ARTIFACTS = {
     "transcripts-whisper": "Whisper (audio → text)",
 }
 
-# Maps job name in the workflow to artifact name
+# Maps job *display name* (the `name:` field in the workflow YAML) to artifact name.
+# These must match the `name:` values under `jobs:` in transcribe.yml exactly.
 JOB_TO_ARTIFACT = {
-    "fast-transcript":    "transcripts-fast",
-    "whisper-transcript": "transcripts-whisper",
+    "Fast Transcript (captions + Supadata)": "transcripts-fast",
+    "Whisper Transcript (audio → text)":     "transcripts-whisper",
 }
 
 
@@ -275,13 +276,17 @@ def poll_and_download(repo: str, run_id: str, downloads_dir: Path):
         jobs = get_jobs_status(repo, run_id)
 
         # Build a compact status line
+        JOB_SHORT = {
+            "Fast Transcript (captions + Supadata)": "fast",
+            "Whisper Transcript (audio → text)":     "whisper",
+        }
         status_parts = []
         for jname in JOB_TO_ARTIFACT:
             j = jobs.get(jname, {})
             st = j.get("status", "queued")
             co = j.get("conclusion", "")
             display = co if co else st
-            status_parts.append(f"{jname.split('-')[0]}:{display}")
+            status_parts.append(f"{JOB_SHORT.get(jname, jname)}:{display}")
 
         print(
             f"\r  {spinner[tick % 4]}  [{elapsed}s]  "
